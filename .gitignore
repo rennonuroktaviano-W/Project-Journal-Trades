@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Build output
+.next/
+out/
+build/
+dist/
+next-env.d.ts
+
+# Environment — jangan pernah commit secret (PRD 9.1)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+logs/
+
+# Testing
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# Uploads & storage (PRD 7.1 — screenshot di luar public root)
+storage/
+public/uploads/
+public/media/
+
+# Cached data pasar
+.cache/
+
+# Editor & OS
+.vscode/*
+!.vscode/settings.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
