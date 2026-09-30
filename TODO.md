@@ -15,7 +15,7 @@ PRD: `docs/PRD TradeLedger - Jurnal Trading Publik Transparan.docx`
 | 1d   | CI GitHub Actions                                   | DONE   |
 | 1e   | TODO.md                                             | DONE   |
 | 2    | Prisma schema 27 tabel + trigger append-only        | DONE   |
-| 3    | Hash chain engine + Merkle root                     | TODO   |
+| 3    | Hash chain engine + Merkle root                     | DONE   |
 | 4    | Auth (register, verifikasi email, rate limit, 2FA)  | TODO   |
 | 5    | Jurnal trade JRN-01..08                             | TODO   |
 | 6    | Analitik performa                                   | TODO   |
@@ -29,6 +29,48 @@ PRD: `docs/PRD TradeLedger - Jurnal Trading Publik Transparan.docx`
 
 PRD bagian 6 menyebut Laravel 11. Keputusan proyek: memakai **Next.js 16** (App Router,
 TypeScript strict) dengan pemetaan berikut.
+
+### Penguncian baris terakhir blok (PRD 7.3 butir 4)
+
+PRD 7.3 butir 4 meminta pembuatan blok memakai `SELECT ... FOR UPDATE` pada blok
+terakhir pengguna. Itu **tidak bisa dipakai** bersama PRD 7.3 butir 1, dan
+sudah diuji langsung di MySQL 8.4:
+
+| Hak pada tabel           | `SELECT ... FOR UPDATE` |
+| ------------------------ | ----------------------- |
+| `SELECT, INSERT`         | ditolak `ERROR 1142`    |
+| `SELECT, INSERT, UPDATE` | berhasil                |
+
+MySQL 8.4 mensyaratkan hak `UPDATE` selain `SELECT` untuk locking read. PRD 7.3
+butir 1 melarang `UPDATE` pada empat tabel append-only, jadi kedua butir itu
+tidak bisa dipenuhi sekaligus.
+
+Butir 1 yang dipilih, karena di situlah jaminan append-only berasal, diperkuat
+trigger, dan diuji di `tests/integration/prisma.test.ts`. Memberi `UPDATE` pada
+tabel append-only demi satu locking read akan menukar keamanan yang sudah
+ditegakkan demi kenyamanan.
+
+Serialisasi diambil dari baris `users` induknya, yang memang selalu ada karena
+`chain_blocks.user_id` memakai `ON DELETE RESTRICT`. Mengunci baris `users`
+memberi jaminan yang sama, dan bahkan lebih kuat:
+
+- Mengunci baris `users` membatasi seluruh append milik satu akun, termasuk saat chain-nya masih kosong.
+  Mengunci blok terakhir tidak menutup kasus itu karena blok pertama belum punya
+  baris untuk dikunci.
+- Baris `users` bukan append-only dan sudah punya hak `UPDATE`, jadi locking read
+  di sana diizinkan.
+- `@@unique([user_id, height])` tetap menjadi penjaga terakhir.
+
+### Hash chain yang tidak disebut detailnya
+
+PRD 10.1 menyebut rumusnya, tapi tidak menyebut pemisah antar-bagian, format
+`created_at`, urutan kunci payload, aturan desimal, maupun algoritma pohon
+Merkle. Semua ditetapkan di `docs/hash-chain-spec.md` supaya bisa dihitung ulang
+pihak ketiga tanpa akses ke server (PRD 10.2, SOC-04), dan nilai contoh di sana
+dikunci test yang menghitung ulang hash-nya sendiri di luar modul yang diuji.
+
+`chain_blocks` tidak punya kolom versi (PRD 7.2), jadi versi spesifikasi
+`tl-chain/1` diikat di dalam payload yang di-hash, bukan lewat kolom terpisah.
 
 | PRD (Laravel)           | Implementasi Next.js                                          |
 | ----------------------- | ------------------------------------------------------------- |
@@ -76,8 +118,9 @@ keempat tabel di atas adalah kandidat pertama untuk digabung ke tabel induknya.
 ## Setup dari nol
 
 ```bash
-# 1. Start MySQL Laragon, lalu bootstrap database dan ketiga akun
-mysql -u root -p < database/01-bootstrap.sql
+# 1. Start MySQL Laragon, lalu bootstrap database dan ketiga akun.
+#    Password dibaca dari .env.local, jadi tidak ada kredensial di file.
+npm run db:bootstrap
 
 # 2. Salin konfigurasi dan isi kredensial
 cp .env.example .env.local
@@ -88,7 +131,7 @@ npm run db:migrate
 # 4. Pasang allow-list hak dan trigger append-only
 #    WAJIB diulang setiap kali migrasi menambah tabel baru.
 #    WAJIB juga diulang setelah `npm run db:reset`.
-mysql -u root -p < database/02-append-only-guard.sql
+npm run db:guard
 
 # 5. Isi data referensi
 npm run db:seed

@@ -33,10 +33,13 @@ describe.skipIf(!adaDatabase)('koneksi Prisma ke MySQL', () => {
   })
 
   it('tabel append-only memang ada dan bisa dibaca', async () => {
-    expect(await prisma.chainBlock.count()).toBe(0)
-    expect(await prisma.tradeRevision.count()).toBe(0)
-    expect(await prisma.auditLog.count()).toBe(0)
-    expect(await prisma.merkleAnchor.count()).toBe(0)
+    // Isinya tidak dikunci: `chain_blocks` bertambah terus dari
+    // `hash-chain.test.ts` karena append-only berarti barisnya tidak bisa
+    // dihapus. Yang dicek di sini adalah tabelnya ada dan bisa dibaca.
+    expect(await prisma.chainBlock.count()).toBeGreaterThanOrEqual(0)
+    expect(await prisma.tradeRevision.count()).toBeGreaterThanOrEqual(0)
+    expect(await prisma.auditLog.count()).toBeGreaterThanOrEqual(0)
+    expect(await prisma.merkleAnchor.count()).toBeGreaterThanOrEqual(0)
   })
 
   it('akun aplikasi tidak boleh mengubah tabel append-only', async () => {
