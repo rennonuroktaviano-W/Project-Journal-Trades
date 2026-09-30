@@ -9,7 +9,7 @@ PRD: `docs/PRD TradeLedger - Jurnal Trading Publik Transparan.docx`
 | Blok | Isi | Status |
 | --- | --- | --- |
 | 0 | Git init, remote, commit pertama, push | DONE |
-| 1a | MySQL Laragon + database `tradeledger` | TODO |
+| 1a | MySQL Laragon + database `tradeledger` | DONE |
 | 1b | Scaffold Next.js 15 + TS strict + Tailwind + ESLint | TODO |
 | 1c | Design token, font, layout responsif | TODO |
 | 1d | CI GitHub Actions | TODO |
@@ -45,8 +45,25 @@ TypeScript strict) dengan pemetaan berikut.
 ## Environment lokal
 
 - PHP 8.3, Composer 2.9, Node 22.22, npm 10.9, Git 2.55
-- MySQL 8.4 (Laragon) — belum dijalankan, start manual lewat Laragon
+- MySQL 8.4 (Laragon) — database `tradeledger`, charset utf8mb4 / utf8mb4_0900_ai_ci
+- Dua akun MySQL dengan hak minimum (PRD 7.3), kredensial di `.env.local`:
+  - `tradeledger_app` — SELECT/INSERT/UPDATE/DELETE, dikurangi UPDATE+DELETE pada
+    `chain_blocks`, `trade_revisions`, `audit_logs`, `merkle_anchors`
+  - `tradeledger_migrate` — DDL penuh, hanya untuk `prisma migrate`
 - Redis belum ada — queue pakai tabel `jobs`
+
+## Setup dari nol
+
+```bash
+# 1. Start MySQL Laragon, lalu bootstrap database
+mysql -u root -p < database/01-bootstrap.sql
+
+# 2. Salin konfigurasi dan isi kredensial
+cp .env.example .env.local
+
+# 3. Setelah `prisma migrate`, pasang pengetatan append-only
+mysql -u root -p < database/02-append-only-guard.sql
+```
 
 ## Checklist Jawaban PRD 14.3
 
