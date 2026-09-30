@@ -19,7 +19,11 @@
 -- Lapis 1 mencegah akun aplikasi langsung. Lapis 2 juga melindungi dari akun
 -- lain yang punya hak penuh, selama trigger tidak di-drop.
 
-SET @APPEND_ONLY := 'chain_blocks,trade_revisions,audit_logs,merkle_anchors';
+-- Empat tabel append-only disebut langsung sebagai daftar literal, bukan lewat
+-- FIND_IN_SET dengan variabel sesi. Perbandingan kolom (utf8mb4_0900_ai_ci)
+-- dengan variabel sesi akan gagal sebagai "illegal mix of collations" kalau
+-- koneksi masuk dengan charset berbeda, sedangkan literal bersifat coercible dan
+-- selalu aman.
 SET SESSION group_concat_max_len = 1048576;
 
 -- Procedure dibuat di dalam basis data aplikasi, jadi `USE` wajib ada.
@@ -90,7 +94,7 @@ BEGIN
      ORDER BY TABLE_NAME
      LIMIT 1 OFFSET v_i;
 
-    SET v_append = FIND_IN_SET(v_table, @APPEND_ONLY) > 0;
+    SET v_append = v_table IN ('chain_blocks', 'trade_revisions', 'audit_logs', 'merkle_anchors');
 
     SET v_i := 0;
     WHILE v_i < 2 DO
@@ -201,7 +205,7 @@ SELECT TABLE_NAME AS 'tabel', PRIVILEGE_TYPE AS 'masih_punya'
   FROM information_schema.TABLE_PRIVILEGES
  WHERE GRANTEE LIKE '''tradeledger_app''@%'
    AND TABLE_SCHEMA = 'tradeledger'
-   AND FIND_IN_SET(TABLE_NAME, 'chain_blocks,trade_revisions,audit_logs,merkle_anchors') > 0
+   AND TABLE_NAME IN ('chain_blocks', 'trade_revisions', 'audit_logs', 'merkle_anchors')
    AND PRIVILEGE_TYPE IN ('UPDATE', 'DELETE');
 
 -- Ringkasan jumlah hak per tabel untuk akun aplikasi.

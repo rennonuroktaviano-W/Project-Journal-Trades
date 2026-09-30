@@ -23,6 +23,8 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
+    "db:bootstrap": "tsx scripts/run-sql.ts database/01-bootstrap.sql",
+    "db:guard": "tsx scripts/run-sql.ts database/02-append-only-guard.sql",
     "db:studio": "prisma studio",
     "db:reset": "prisma migrate reset --force"
   },

@@ -1,0 +1,178 @@
+# CI TradeLedger (PRD 13.2, 13.3)
+#
+# Yang diuji setiap push dan pull request:
+#   1. Kualitas kode  — ESLint, Prettier, tsc --noEmit
+#   2. Skema database — migrasi terhadap MySQL kosong
+#   3. Lapis keamanan — allow-list hak akun aplikasi dan trigger append-only
+#   4. Test           — unit dan integrasi
+#   5. Build produksi — next build
+#
+# MySQL dijalankan sebagai service container supaya langkah 3 benar-benar
+# menguji hak database, bukan sekadar kode yang dikompilasi. Rahasia hanya
+# ada di repo ini sebagai nilai dummy; kredensial asli tidak pernah masuk CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Batalkan eksekusi lama kalau commit baru sudah masuk, biar tidak boros menit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint, test, dan build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root-ci-secret
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot-ci-secret"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: mysql://tradeledger_app:app-ci-secret@127.0.0.1:3306/tradeledger
+      DATABASE_MIGRATE_URL: mysql://tradeledger_migrate:migrate-ci-secret@127.0.0.1:3306/tradeledger
+      DATABASE_SHADOW_URL: mysql://tradeledger_migrate:migrate-ci-secret@127.0.0.1:3306/tradeledger_shadow
+      MYSQL_ROOT_URL: mysql://root:root-ci-secret@127.0.0.1:3306
+      DATABASE_SSL: 'false'
+      SESSION_SECRET: ci-secret-not-used-in-production
+
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Pasang Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Pasang dependency
+        run: npm ci
+
+      # Wajib sebelum typecheck: modul Prisma Client dibuat oleh generator dan
+      # tidak ikut di-commit.
+      - name: Generate Prisma Client
+        run: npm run db:generate
+
+      - name: Cek format
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tunggu MySQL siap
+        run: |
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h 127.0.0.1 -uroot -proot-ci-secret --silent; then
+              echo "MySQL siap."
+              exit 0
+            fi
+            echo "Menunggu MySQL... ($i)"
+            sleep 2
+          done
+          echo "MySQL tidak siap dalam 60 detik."
+          exit 1
+
+      - name: Siapkan akun database
+        run: npm run db:bootstrap
+
+      - name: Migrasi skema
+        run: npx prisma migrate deploy
+
+      - name: Pasang allow-list hak dan trigger append-only
+        run: npm run db:guard
+
+      - name: Isi data referensi
+        run: npm run db:seed
+
+      - name: Pastikan skema tidak drifted
+        run: npx prisma migrate status
+
+      - name: Test
+        run: npm test
+
+      - name: Pastikan pengetatan append-only benar-benar berlaku
+        run: |
+          set -euo pipefail
+          mysql_do() { mysql -h 127.0.0.1 -uroot -proot-ci-secret -N -B -e "$1"; }
+
+          trigger=$(mysql_do "SELECT COUNT(*) FROM information_schema.TRIGGERS
+                                WHERE TRIGGER_SCHEMA = 'tradeledger';")
+          echo "Trigger: $trigger"
+
+          bocor=$(mysql_do "SELECT COUNT(*) FROM information_schema.TABLE_PRIVILEGES
+                            WHERE GRANTEE LIKE '%tradeledger_app%'
+                              AND TABLE_NAME IN ('chain_blocks', 'trade_revisions', 'audit_logs', 'merkle_anchors')
+                              AND PRIVILEGE_TYPE IN ('UPDATE', 'DELETE');")
+          echo "Hak UPDATE/DELETE bocor: $bocor"
+
+          grant_db=$(mysql_do "SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES
+                               WHERE GRANTEE LIKE '%tradeledger_app%';")
+          echo "Grant level database: $grant_db"
+
+          writable=$(mysql_do "SELECT COUNT(*) FROM information_schema.TABLE_PRIVILEGES
+                               WHERE GRANTEE LIKE '%tradeledger_app%'
+                                 AND PRIVILEGE_TYPE = 'DELETE';")
+          echo "Tabel yang boleh ditulis: $writable"
+
+          if [ "$trigger" -ne 8 ]; then
+            echo "Harus ada 8 trigger append-only, ditemukan $trigger."
+            exit 1
+          fi
+          if [ "$bocor" -ne 0 ]; then
+            echo "Akun aplikasi punya UPDATE/DELETE pada tabel append-only."
+            exit 1
+          fi
+          if [ "$grant_db" -ne 0 ]; then
+            echo "Akun aplikasi masih punya grant di level database, allow-list tidak berlaku."
+            exit 1
+          fi
+          if [ "$writable" -lt 20 ]; then
+            echo "Hak DML tabel biasa hilang, allow-list terlalu ketat."
+            exit 1
+          fi
+
+      - name: Build produksi
+        run: npm run build
+
+  security-audit:
+    name: Audit dependensi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Pasang Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Pasang dependency
+        run: npm ci
+
+      - name: npm audit
+        run: npm audit --audit-level=high

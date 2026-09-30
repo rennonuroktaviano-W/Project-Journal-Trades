@@ -12,7 +12,7 @@ PRD: `docs/PRD TradeLedger - Jurnal Trading Publik Transparan.docx`
 | 1a   | MySQL Laragon + database `tradeledger`              | DONE   |
 | 1b   | Scaffold Next.js 16 + TS strict + Tailwind + ESLint | DONE   |
 | 1c   | Design token, font, layout responsif                | DONE   |
-| 1d   | CI GitHub Actions                                   | TODO   |
+| 1d   | CI GitHub Actions                                   | DONE   |
 | 1e   | TODO.md                                             | DONE   |
 | 2    | Prisma schema 27 tabel + trigger append-only        | DONE   |
 | 3    | Hash chain engine + Merkle root                     | TODO   |
