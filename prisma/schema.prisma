@@ -1,0 +1,787 @@
+// TradeLedger — skema database.
+//
+// PRD 7.1 daftar tabel, PRD 7.2 kolom inti.
+//
+// Aturan yang berlaku untuk seluruh skema ini:
+// - Primary key internal BIGINT UNSIGNED plus ulid CHAR(26) UNIQUE di URL,
+//   supaya ID publik tidak bisa ditebak berurutan (PRD 7).
+// - Uang dan harga memakai Decimal(36,18), tidak pernah Float (PRD 7).
+// - Semua waktu disimpan dalam UTC dengan presisi milidetik.
+// - Nama kolom di database memakai snake_case sesuai PRD 7.2. Field Prisma
+//   ditulis camelCase lalu dipetakan dengan @map. Konsistensi ini penting
+//   karena SQLmentah dan payload hash chain merujuk nama kolom secara langsung.
+// - Foreign key memakai onDelete: Restrict supaya data trade tidak hilang
+//   lewat cascade (PRD 7.3).
+// - Empat tabel bersifat append-only dan dikunci di database, bukan di kode:
+//   trade_revisions, chain_blocks, audit_logs, merkle_anchors.
+//
+// Catatan MySQL: Prisma tidak bisa membuat trigger lewat skema, jadi trigger
+// dan pengetatan hak akun dibuat oleh database/02-append-only-guard.sql.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  // URL diambil dari prisma.config.ts memakai DATABASE_MIGRATE_URL saat migrasi.
+}
+
+// ===========================================================================
+// Enum
+// ===========================================================================
+
+enum Role {
+  trader
+  moderator
+  admin
+}
+
+enum UserStatus {
+  active
+  suspended
+  banned
+}
+
+enum Market {
+  forex
+  crypto
+  memecoin
+}
+
+enum TradeSide {
+  long
+  short
+}
+
+enum TradeStatus {
+  open
+  closed
+  cancelled
+}
+
+/// `committed` berarti isi disembunyikan tetapi hash tetap tercatat, sehingga
+/// cherry-picking tidak mungkin terjadi (PRD 10.3).
+enum TradeVisibility {
+  public
+  committed
+}
+
+/// PRD 10.4: hash chain membuktikan data tidak diubah setelah dicatat, bukan
+/// bahwa trade benar-benar terjadi di exchange. Karena itu asal datanya perlu
+/// dilabeli jelas.
+enum DataOrigin {
+  /// Dicatat manual oleh trader lewat formulir.
+  manual
+  /// Diimpor dari laporan CSV broker atau exchange.
+  csv_import
+  /// Diambil lewat API exchange read-only. Belum tersedia di versi 1.
+  exchange_api
+}
+
+enum Emotion {
+  calm
+  fomo
+  greed
+  fear
+  revenge
+  boredom
+  confidence
+  hesitation
+  other
+}
+
+enum SessionType {
+  password
+  google
+  totp
+  recovery_code
+}
+
+enum ReportStatus {
+  pending
+  accepted
+  rejected
+}
+
+enum ReportReason {
+  spam
+  scam
+  pump_and_dump
+  harassment
+  misinformation
+  off_topic
+  other
+}
+
+enum NotificationType {
+  followed_trader_opened
+  followed_trader_closed
+  comment_reply
+  comment_hidden
+  report_resolved
+  integrity_anomaly
+}
+
+// ===========================================================================
+// Akun, sesi, dan keamanan
+// ===========================================================================
+
+/// Sesi aktif. PRD 4.1 AUTH-06 meminta daftar sesi dan logout semua perangkat.
+model UserSession {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 dari token cookie. Token mentah tidak pernah disimpan (PRD 9.2).
+  tokenHash String      @unique @map("token_hash") @db.Char(64)
+  userAgent String?     @map("user_agent") @db.VarChar(255)
+  /// Bentuk biner 16 byte dari alamat IPv4 atau IPv6 (PRD 7.2).
+  ipAddress Bytes?      @map("ip_address") @db.Binary(16)
+  type      SessionType @default(password)
+
+  lastUsedAt DateTime  @default(now()) @map("last_used_at") @db.DateTime(3)
+  expiresAt  DateTime  @map("expires_at") @db.DateTime(3)
+  revokedAt  DateTime? @map("revoked_at") @db.DateTime(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([userId, revokedAt])
+  @@map("sessions")
+}
+
+model User {
+  id       BigInt @id @default(autoincrement())
+  ulid     String @unique @db.Char(26)
+  username String @unique @db.VarChar(30)
+  email    String @unique @db.VarChar(255)
+
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.DateTime(3)
+  /// Argon2id atau bcrypt cost 12. Tidak pernah disimpan atau dilog mentah.
+  passwordHash    String    @map("password") @db.VarChar(255)
+
+  role   Role       @default(trader)
+  status UserStatus @default(active)
+
+  /// Kunci privat TOTP dalam keadaan terenkripsi memakai APP_KEY (PRD 9.2).
+  twoFactorSecret    Bytes?    @map("two_factor_secret")
+  twoFactorEnabledAt DateTime? @map("two_factor_enabled_at") @db.DateTime(3)
+
+  lastLoginAt DateTime? @map("last_login_at") @db.DateTime(3)
+  /// Bentuk biner 16 byte, ditampilkan seperlunya lalu dianonimkan (PRD 9.4).
+  lastLoginIp Bytes?    @map("last_login_ip") @db.Binary(16)
+
+  /// Sisa masa suspensi. Rate limit keras memakai kolom failed_login_count.
+  suspendedUntil   DateTime? @map("suspended_until") @db.DateTime(3)
+  failedLoginCount Int       @default(0) @map("failed_login_count")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(3)
+
+  profile             UserProfile?
+  trades              Trade[]
+  revisions           TradeRevision[]
+  chainBlocks         ChainBlock[]
+  strategies          Strategy[]
+  sessions            UserSession[]
+  traderStats         TraderStats?
+  passwordResetTokens PasswordResetToken[]
+  passwordHistory     PasswordHistory[]
+  twoFactorRecovery   TwoFactorRecovery[]
+
+  following     Follow[]       @relation("FollowFollower")
+  followers     Follow[]       @relation("FollowFollowed")
+  comments      Comment[]
+  likes         Like[]
+  reports       Report[]       @relation("ReportReporter")
+  notifications Notification[]
+  auditLogs     AuditLog[]
+  loginAttempts LoginAttempt[]
+
+  @@index([status, role])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model UserProfile {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  bio      String? @db.Text
+  avatar   String? @db.VarChar(255)
+  country  String? @db.Char(2)
+  timezone String? @db.VarChar(64)
+  /// Mata uang tampilan mengikuti locale pengguna, default IDR.
+  currency String? @db.Char(3)
+
+  socialLinks Json? @map("social_links") @db.Json
+
+  /// Profil disembunyikan dari halaman publik bila trader memilih begitu.
+  isPrivate         Boolean @default(false) @map("is_private")
+  showInLeaderboard Boolean @default(true) @map("show_in_leaderboard")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@map("user_profiles")
+}
+
+/// Menyimpan hash password sebelumnya supaya password yang sama tidak bisa
+/// dipakai ulang setelah pengguna menggantinya (PRD 9.2).
+model PasswordHistory {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([userId, createdAt])
+  @@map("password_history")
+}
+
+/// Token reset password disimpan sebagai hash, bukan token mentah (PRD 7.1).
+model PasswordResetToken {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash   String    @unique @map("token_hash") @db.Char(64)
+  /// AUTH-04: berlaku 60 menit.
+  expiresAt   DateTime  @map("expires_at") @db.DateTime(3)
+  usedAt      DateTime? @map("used_at") @db.DateTime(3)
+  requestedIp Bytes?    @map("requested_ip") @db.Binary(16)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([userId, expiresAt])
+  @@map("password_reset_tokens")
+}
+
+/// Recovery code 2FA. AUTH-05 hanya menyimpan hashnya, sama seperti password.
+model TwoFactorRecovery {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  codeHash  String    @map("code_hash") @db.Char(64)
+  usedAt    DateTime? @map("used_at") @db.DateTime(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([userId, usedAt])
+  @@map("user_two_factor_recovery")
+}
+
+// ===========================================================================
+// Master instrumen dan strategi
+// ===========================================================================
+
+model Instrument {
+  id        BigInt  @id @default(autoincrement())
+  /// Simbol tampilan, misalnya EURUSD, BTCUSDT, atau alamat token memecoin.
+  symbol    String  @unique @db.VarChar(32)
+  name      String  @db.VarChar(120)
+  market    Market
+  /// Berapa digit setelah titik desimal. Forex 5, crypto 8, memecoin 18.
+  precision Int     @default(8)
+  isActive  Boolean @default(true) @map("is_active")
+  /// Penanda aset berisiko tinggi, misalnya MEME atau sudah rug.
+  riskFlag  String? @map("risk_flag") @db.VarChar(32)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  trades Trade[]
+
+  @@index([market, isActive])
+  @@map("instruments")
+}
+
+/// Setup atau strategi milik pengguna (PRD 7.1).
+model Strategy {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name        String  @db.VarChar(80)
+  description String? @db.Text
+  /// Daftar syarat sebelum entry, dipakai checklist pra-trade (JRN-10).
+  checklist   Json?   @db.Json
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  trades Trade[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("strategies")
+}
+
+// ===========================================================================
+// Jurnal trade
+// ===========================================================================
+
+model Trade {
+  id           BigInt     @id @default(autoincrement())
+  ulid         String     @unique @db.Char(26)
+  userId       BigInt     @map("user_id")
+  user         User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  instrumentId BigInt     @map("instrument_id")
+  instrument   Instrument @relation(fields: [instrumentId], references: [id], onDelete: Restrict)
+  strategyId   BigInt?    @map("strategy_id")
+  strategy     Strategy?  @relation(fields: [strategyId], references: [id], onDelete: SetNull)
+
+  market     Market
+  side       TradeSide
+  status     TradeStatus     @default(open)
+  visibility TradeVisibility @default(public)
+  origin     DataOrigin      @default(manual)
+
+  entryPrice   Decimal? @map("entry_price") @db.Decimal(36, 18)
+  stopLoss     Decimal? @map("stop_loss") @db.Decimal(36, 18)
+  takeProfit   Decimal? @map("take_profit") @db.Decimal(36, 18)
+  exitPrice    Decimal? @map("exit_price") @db.Decimal(36, 18)
+  /// Lot untuk forex, jumlah koin untuk crypto dan memecoin.
+  positionSize Decimal? @map("position_size") @db.Decimal(36, 18)
+  leverage     Decimal  @default(1) @db.Decimal(8, 2)
+
+  /// Fee, swap, dan funding digabung agar analitik lebih sederhana.
+  fees       Decimal  @default(0) @db.Decimal(36, 18)
+  /// Nilai uang yang dipertaruhkan, dipakai menghitung R.
+  riskAmount Decimal? @map("risk_amount") @db.Decimal(36, 18)
+  /// Hitungan server, tidak pernah diterima dari request (PRD 9.1).
+  pnl        Decimal? @db.Decimal(36, 18)
+  /// PnL dibagi risk_amount. Loss berarti R negatif.
+  rMultiple  Decimal? @map("r_multiple") @db.Decimal(36, 18)
+
+  openedAt DateTime  @map("opened_at") @db.DateTime(3)
+  closedAt DateTime? @map("closed_at") @db.DateTime(3)
+
+  /// Field khusus pasar (PRD 4.2 JRN-03).
+  /// forex   : pip, lot, spread, session
+  /// crypto  : exchange, spot atau futures
+  /// memecoin: chain, contract_address, dex, market_cap_at_entry
+  meta Json? @db.Json
+
+  reason  String?  @db.Text
+  review  String?  @db.Text
+  emotion Emotion?
+
+  currentRevision Int     @default(1) @map("current_revision")
+  /// Blok terakhir pada hash chain yang merujuk trade ini.
+  chainBlockId    BigInt? @map("chain_block_id")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(3)
+
+  revisions   TradeRevision[]
+  media       TradeMedia[]
+  chainBlocks ChainBlock[]
+  tagsRel     TradeTag[]
+  comments    Comment[]
+  likes       Like[]
+
+  @@index([userId, openedAt])
+  @@index([market, status, openedAt])
+  @@index([instrumentId, openedAt])
+  @@index([visibility, createdAt])
+  @@index([status, openedAt])
+  @@map("trades")
+}
+
+/// Riwayat setiap perubahan trade. Append-only: tidak ada UPDATE atau DELETE
+/// (PRD 7.2). Edit membuat baris baru, versi lama tetap utuh dan terlihat publik.
+model TradeRevision {
+  id      BigInt @id @default(autoincrement())
+  tradeId BigInt @map("trade_id")
+  trade   Trade  @relation(fields: [tradeId], references: [id], onDelete: Restrict)
+
+  revisionNo    Int      @map("revision_no")
+  /// Isi lengkap trade pada revisi ini, sudah termasuk nilai turunan.
+  snapshot      Json     @db.Json
+  /// Wajib diisi setiap kali trade diedit (PRD Flow C).
+  changeReason  String   @map("change_reason") @db.VarChar(500)
+  createdBy     BigInt   @map("created_by")
+  createdByUser User     @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+  createdAt     DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  chainBlocks ChainBlock[]
+
+  @@unique([tradeId, revisionNo])
+  @@index([createdAt])
+  @@map("trade_revisions")
+}
+
+/// Screenshot chart. Maksimal 3 per trade (PRD 4.2 JRN-05).
+model TradeMedia {
+  id      BigInt @id @default(autoincrement())
+  tradeId BigInt @map("trade_id")
+  trade   Trade  @relation(fields: [tradeId], references: [id], onDelete: Restrict)
+
+  /// Nama acak di server. Nama asli dari user tidak pernah dipakai sebagai path,
+  /// supaya tidak ada path traversal.
+  filename     String @db.VarChar(255)
+  /// Format setelah diproses ulang di server, misalnya webp.
+  format       String @db.VarChar(16)
+  /// MIME hasil pemeriksaan magic bytes, bukan dari header kiriman.
+  detectedMime String @map("detected_mime") @db.VarChar(64)
+  byteSize     Int    @map("byte_size")
+  width        Int?
+  height       Int?
+  /// SHA-256 isi berkas, memastikan berkas tidak berubah setelah diunggah.
+  contentHash  String @map("content_hash") @db.Char(64)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([tradeId])
+  @@map("trade_media")
+}
+
+model Tag {
+  id        BigInt   @id @default(autoincrement())
+  name      String   @unique @db.VarChar(40)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  trades TradeTag[]
+
+  @@map("tags")
+}
+
+model TradeTag {
+  tradeId BigInt @map("trade_id")
+  trade   Trade  @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  tagId   BigInt @map("tag_id")
+  tag     Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([tradeId, tagId])
+  @@index([tagId])
+  @@map("trade_tags")
+}
+
+// ===========================================================================
+// Integritas: hash chain dan jangkar Merkle
+// ===========================================================================
+
+/// Satu blok hash per perubahan trade. Append-only (PRD 7.2).
+///
+/// height        Urutan blok milik satu pengguna, mulai dari 0.
+/// payload_hash  SHA-256 dari payload kanonik trade.
+/// prev_hash     Hash blok sebelumnya, atau 64 nol untuk blok genesis.
+/// block_hash    SHA-256(prev_hash + payload_hash + height + created_at).
+model ChainBlock {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  height  Int
+  tradeId BigInt? @map("trade_id")
+  trade   Trade?  @relation(fields: [tradeId], references: [id], onDelete: Restrict)
+
+  revisionNo Int?           @map("revision_no")
+  revisionId BigInt?        @map("revision_id")
+  revision   TradeRevision? @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+
+  payloadHash String @map("payload_hash") @db.Char(64)
+  prevHash    String @map("prev_hash") @db.Char(64)
+  blockHash   String @unique @map("block_hash") @db.Char(64)
+
+  /// Waktu server, bukan dari user (PRD 10.3).
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@unique([userId, height])
+  @@index([userId, createdAt])
+  @@index([tradeId])
+  @@map("chain_blocks")
+}
+
+/// Akar Merkle harian untuk menggabungkan seluruh chain semua pengguna
+/// menjadi satu bukti ringkas (PRD 10.2). Append-only.
+model MerkleAnchor {
+  id          BigInt   @id @default(autoincrement())
+  anchorDate  DateTime @unique @map("anchor_date") @db.Date
+  merkleRoot  String   @map("merkle_root") @db.Char(64)
+  blockCount  Int      @map("block_count")
+  /// Bukti jangkar eksternal seperti OpenTimestamps. Fase lanjut (P2).
+  externalRef String?  @map("external_ref") @db.VarChar(255)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@map("merkle_anchors")
+}
+
+// ===========================================================================
+// Sosial
+// ===========================================================================
+
+model Follow {
+  id         BigInt   @id @default(autoincrement())
+  followerId BigInt   @map("follower_id")
+  follower   User     @relation("FollowFollower", fields: [followerId], references: [id], onDelete: Cascade)
+  followedId BigInt   @map("followed_id")
+  followed   User     @relation("FollowFollowed", fields: [followedId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@unique([followerId, followedId])
+  @@index([followedId])
+  @@map("follows")
+}
+
+model Comment {
+  id      BigInt @id @default(autoincrement())
+  tradeId BigInt @map("trade_id")
+  trade   Trade  @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  userId  BigInt @map("user_id")
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  parentId BigInt? @map("parent_id")
+  /// Isi sudah disanitasi server dan tetap diekscape saat ditampilkan (PRD 9.1).
+  body     String  @db.Text
+
+  /// Moderasi: komentar tidak dihapus, hanya disembunyikan supaya jejaknya ada.
+  hiddenAt     DateTime? @map("hidden_at") @db.DateTime(3)
+  hiddenBy     BigInt?   @map("hidden_by")
+  hiddenReason String?   @map("hidden_reason") @db.VarChar(255)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(3)
+
+  parent  Comment?  @relation("CommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[] @relation("CommentThread")
+
+  @@index([tradeId, createdAt])
+  @@index([userId])
+  @@index([hiddenAt])
+  @@map("comments")
+}
+
+/// Like pada trade. Unik per pasangan pengguna dan trade supaya tidak dobel.
+model Like {
+  id        BigInt   @id @default(autoincrement())
+  tradeId   BigInt   @map("trade_id")
+  trade     Trade    @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  userId    BigInt   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@unique([tradeId, userId])
+  @@index([userId])
+  @@map("likes")
+}
+
+model Report {
+  id         BigInt  @id @default(autoincrement())
+  reporterId BigInt? @map("reporter_id")
+  reporter   User?   @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: SetNull)
+
+  /// Target bisa berupa trade, komentar, atau profil trader.
+  entityType String  @map("entity_type") @db.VarChar(32)
+  entityId   BigInt  @map("entity_id")
+  entityUlid String? @map("entity_ulid") @db.Char(26)
+
+  reason ReportReason
+  detail String?      @db.VarChar(1000)
+  status ReportStatus @default(pending)
+
+  resolvedBy BigInt?   @map("resolved_by")
+  resolution String?   @db.VarChar(500)
+  resolvedAt DateTime? @map("resolved_at") @db.DateTime(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([status, createdAt])
+  @@index([entityType, entityId])
+  @@index([reporterId])
+  @@map("reports")
+}
+
+model Notification {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type  NotificationType
+  title String           @db.VarChar(120)
+  body  String?          @db.VarChar(500)
+  link  String?          @db.VarChar(255)
+
+  readAt    DateTime? @map("read_at") @db.DateTime(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+// ===========================================================================
+// Statistik, audit, keamanan, dan pendukung
+// ===========================================================================
+
+/// Ringkasan statistik hasil hitungan server, bukan input pengguna (PRD 4.3).
+/// Diisi job ComputeTraderStats supaya halaman publik tetap cepat.
+model TraderStats {
+  id     BigInt @id @default(autoincrement())
+  userId BigInt @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  totalTrades  Int @default(0) @map("total_trades")
+  closedTrades Int @default(0) @map("closed_trades")
+  openTrades   Int @default(0) @map("open_trades")
+  wins         Int @default(0)
+  losses       Int @default(0)
+
+  /// Angka finansial memakai skala yang sama dengan tabel trades.
+  totalPnl       Decimal @default(0) @map("total_pnl") @db.Decimal(36, 18)
+  grossProfit    Decimal @default(0) @map("gross_profit") @db.Decimal(36, 18)
+  grossLoss      Decimal @default(0) @map("gross_loss") @db.Decimal(36, 18)
+  winRate        Decimal @default(0) @map("win_rate") @db.Decimal(9, 6)
+  profitFactor   Decimal @default(0) @map("profit_factor") @db.Decimal(36, 18)
+  avgR           Decimal @default(0) @map("avg_r") @db.Decimal(36, 18)
+  expectancy     Decimal @default(0) @db.Decimal(36, 18)
+  maxDrawdown    Decimal @default(0) @map("max_drawdown") @db.Decimal(36, 18)
+  maxDrawdownPct Decimal @default(0) @map("max_drawdown_pct") @db.Decimal(9, 6)
+  avgDurationSec Decimal @default(0) @map("avg_duration_sec") @db.Decimal(36, 18)
+  largestWin     Decimal @default(0) @map("largest_win") @db.Decimal(36, 18)
+  largestLoss    Decimal @default(0) @map("largest_loss") @db.Decimal(36, 18)
+
+  currentStreak   Int @default(0) @map("current_streak")
+  bestWinStreak   Int @default(0) @map("best_win_streak")
+  worstLossStreak Int @default(0) @map("worst_loss_streak")
+
+  /// Rekap harian untuk equity curve dan kalender PnL (PRD 4.3).
+  equityCurve Json? @map("equity_curve") @db.Json
+  dailyPnl    Json? @map("daily_pnl") @db.Json
+
+  /// Panjang chain dan hash kepala saat statistik dihitung. Badge integritas
+  /// memakai ini supaya tidak perlu membaca seluruh chain tiap request.
+  chainLength       Int       @default(0) @map("chain_length")
+  chainHeadHash     String?   @map("chain_head_hash") @db.Char(64)
+  hasRevisions      Boolean   @default(false) @map("has_revisions")
+  integrityVerified DateTime? @map("integrity_verified") @db.DateTime(3)
+
+  computedAt DateTime @default(now()) @map("computed_at") @db.DateTime(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@map("trader_stats")
+}
+
+/// Catatan aksi sensitif. Append-only (PRD 7.2). Tidak pernah memuat data
+/// rahasia seperti password, token, atau isi form (PRD 9.1).
+model AuditLog {
+  id      BigInt  @id @default(autoincrement())
+  actorId BigInt? @map("actor_id")
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  action     String  @db.VarChar(80)
+  entityType String? @map("entity_type") @db.VarChar(32)
+  entityId   BigInt? @map("entity_id")
+
+  ipAddress Bytes?  @map("ip_address") @db.Binary(16)
+  userAgent String? @map("user_agent") @db.VarChar(255)
+  context   Json?   @db.Json
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+/// Percobaan login untuk deteksi brute force dan credential stuffing (PRD 9.1).
+/// IP disimpan seperlunya lalu dianonimkan setelah 90 hari (PRD 9.4).
+model LoginAttempt {
+  id     BigInt  @id @default(autoincrement())
+  userId BigInt? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  /// Hash email supaya indeks tetap berguna tanpa menyimpan email mentah
+  /// pada tabel yang bisa dibaca luas (PRD 9.4).
+  emailHash String  @map("email_hash") @db.Char(64)
+  ipAddress Bytes?  @map("ip_address") @db.Binary(16)
+  userAgent String? @map("user_agent") @db.VarChar(255)
+
+  successful    Boolean  @default(false)
+  /// Alasan kegagalan dicatat tanpa membocorkan apakah email itu terdaftar.
+  failureReason String?  @map("failure_reason") @db.VarChar(64)
+  createdAt     DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([emailHash, createdAt])
+  @@index([ipAddress, createdAt])
+  @@index([userId, createdAt])
+  @@map("login_attempts")
+}
+
+/// Cache OHLC dari penyedia data pasar supaya hemat kuota dan cepat (PRD 4.5).
+/// Data ini bukan sumber kebenaran dan boleh dibangun ulang kapan saja.
+model MarketCandle {
+  id       BigInt   @id @default(autoincrement())
+  symbol   String   @db.VarChar(32)
+  interval String   @db.VarChar(8)
+  openTime DateTime @map("open_time") @db.DateTime(3)
+
+  open   Decimal @db.Decimal(36, 18)
+  high   Decimal @db.Decimal(36, 18)
+  low    Decimal @db.Decimal(36, 18)
+  close  Decimal @db.Decimal(36, 18)
+  volume Decimal @default(0) @db.Decimal(36, 18)
+
+  /// Sumber data, misalnya binance atau bybit.
+  source    String   @db.VarChar(32)
+  fetchedAt DateTime @default(now()) @map("fetched_at") @db.DateTime(3)
+
+  @@unique([symbol, interval, openTime])
+  @@index([symbol, openTime])
+  @@map("market_candles")
+}
+
+model Setting {
+  key       String   @id @db.VarChar(80)
+  value     Json     @db.Json
+  updatedBy BigInt?  @map("updated_by")
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@map("settings")
+}
+
+/// Antrean job di database, menggantikan Laravel Queue (PRD 6).
+/// Redis bisa menyusul tanpa mengubah pemanggil job.
+model Job {
+  id          BigInt    @id @default(autoincrement())
+  queue       String    @default("default") @db.VarChar(64)
+  /// Nama class handler, bukan closure, supaya bisa di-restart tanpa kehilangan.
+  handler     String    @db.VarChar(120)
+  payload     Json      @db.Json
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3) @map("max_attempts")
+  /// Waktu paling awal job boleh diambil worker.
+  availableAt DateTime  @default(now()) @map("available_at") @db.DateTime(3)
+  reservedAt  DateTime? @map("reserved_at") @db.DateTime(3)
+  completedAt DateTime? @map("completed_at") @db.DateTime(3)
+  failedAt    DateTime? @map("failed_at") @db.DateTime(3)
+  lastError   String?   @map("last_error") @db.VarChar(1000)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([queue, availableAt])
+  @@index([completedAt, failedAt])
+  @@map("jobs")
+}
+
+/// Riwayat eksekusi job. Berguna saat menelusuri kenapa angka statistik berubah.
+model JobRun {
+  id         BigInt  @id @default(autoincrement())
+  jobId      BigInt? @map("job_id")
+  queue      String  @db.VarChar(64)
+  handler    String  @db.VarChar(120)
+  status     String  @db.VarChar(16)
+  durationMs Int     @default(0) @map("duration_ms")
+  error      String? @db.VarChar(1000)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([queue, createdAt])
+  @@map("job_runs")
+}

@@ -1,14 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
-import {
-  MissingEnvError,
-  env,
-  envBool,
-  envInt,
-  login,
-  passwordReset,
-  upload,
-} from '@/lib/env'
+import { MissingEnvError, db, env, envBool, envInt, login, passwordReset, upload } from '@/lib/env'
 
 const KUNCI = [
   'VARIABEL_YANG_TIDAK_ADA',
@@ -18,6 +10,9 @@ const KUNCI = [
   'LOGIN_LOCKOUT_THRESHOLD',
   'UPLOAD_MAX_BYTES',
   'PASSWORD_RESET_TTL',
+  'DATABASE_URL',
+  'DATABASE_MIGRATE_URL',
+  'DATABASE_SSL',
 ]
 
 afterEach(() => {
@@ -78,5 +73,26 @@ describe('pembacaan environment', () => {
 
   it('token reset password berlaku 60 menit (AUTH-04)', () => {
     expect(passwordReset.ttlSeconds()).toBe(3600)
+  })
+
+  it('TLS database mati secara bawaan untuk loopback lokal', () => {
+    delete process.env.DATABASE_SSL
+    expect(db.ssl()).toBe(false)
+
+    process.env.DATABASE_SSL = 'true'
+    expect(db.ssl()).toBe(true)
+  })
+
+  it('kredensial migrasi dipakai hanya bila ada, lalu jatuh ke DATABASE_URL', () => {
+    delete process.env.DATABASE_URL
+    delete process.env.DATABASE_MIGRATE_URL
+    expect(() => db.url()).toThrow(MissingEnvError)
+
+    process.env.DATABASE_URL = 'mysql://app:rahasia@127.0.0.1:3306/tradeledger'
+    expect(db.url()).toBe(process.env.DATABASE_URL)
+    expect(db.migrateUrl()).toBe(process.env.DATABASE_URL)
+
+    process.env.DATABASE_MIGRATE_URL = 'mysql://migrate:rahasia@127.0.0.1:3306/tradeledger'
+    expect(db.migrateUrl()).toBe(process.env.DATABASE_MIGRATE_URL)
   })
 })

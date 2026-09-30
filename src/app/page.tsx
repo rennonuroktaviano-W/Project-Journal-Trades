@@ -38,16 +38,25 @@ export default function HomePage() {
         </div>
 
         <ul className="mt-12 grid gap-3 text-left sm:grid-cols-3">
-          <Feature title="Hash chain" body="Setiap perubahan menambah blok baru, blok lama tetap utuh." />
-          <Feature title="Statistik server" body="Win rate dan expectancy dihitung ulang dari data, bukan klaim trader." />
-          <Feature title="Tanpa biaya" body="Tidak ada langganan, tidak ada sinyal berbayar, tidak ada penyimpan dana." />
+          <Feature
+            title="Hash chain"
+            body="Setiap perubahan menambah blok baru, blok lama tetap utuh."
+          />
+          <Feature
+            title="Statistik server"
+            body="Win rate dan expectancy dihitung ulang dari data, bukan klaim trader."
+          />
+          <Feature
+            title="Tanpa biaya"
+            body="Tidak ada langganan, tidak ada sinyal berbayar, tidak ada penyimpan dana."
+          />
         </ul>
       </section>
 
       <p className="mx-auto mt-16 max-w-2xl border-t border-border pt-6 text-center text-xs text-text-secondary">
-        Konten di platform ini adalah catatan pribadi trader, bukan rekomendasi investasi.
-        Trading forex, crypto, dan memecoin berisiko tinggi dan dapat menghilangkan seluruh
-        modal yang ditempatkan.
+        Konten di platform ini adalah catatan pribadi trader, bukan rekomendasi investasi. Trading
+        forex, crypto, dan memecoin berisiko tinggi dan dapat menghilangkan seluruh modal yang
+        ditempatkan.
       </p>
     </PageShell>
   )

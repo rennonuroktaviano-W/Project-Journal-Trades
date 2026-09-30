@@ -32,7 +32,9 @@ const CSP_DIRECTIVES: Array<[string, string[]]> = [
 
 function buildCsp(nonce: string): string {
   return CSP_DIRECTIVES.map(([directive, values]) =>
-    values.length === 0 ? directive : `${directive} ${values.join(' ').replace('__nonce__', nonce)}`,
+    values.length === 0
+      ? directive
+      : `${directive} ${values.join(' ').replace('__nonce__', nonce)}`,
   ).join('; ')
 }
 
@@ -41,7 +43,8 @@ export default function proxy(request: NextRequest) {
 
   // Halaman yang tidak boleh di-cache browser karena berisi data per pengguna.
   const isPrivate = ['/dashboard', '/journal', '/settings', '/analytics', '/admin'].some(
-    (prefix) => request.nextUrl.pathname === prefix || request.nextUrl.pathname.startsWith(`${prefix}/`),
+    (prefix) =>
+      request.nextUrl.pathname === prefix || request.nextUrl.pathname.startsWith(`${prefix}/`),
   )
 
   const requestHeaders = new Headers(request.headers)
@@ -66,7 +69,8 @@ export const config = {
      * dan tidak butuh CSP per-request.
      */
     {
-      source: '/((?!_next/static|_next/image|favicon.ico|fonts/|.*\\.(?:png|jpg|jpeg|webp|svg|ico|css|js|woff2)$).*)',
+      source:
+        '/((?!_next/static|_next/image|favicon.ico|fonts/|.*\\.(?:png|jpg|jpeg|webp|svg|ico|css|js|woff2)$).*)',
       missing: [
         { type: 'header', key: 'next-router-prefetch' },
         { type: 'header', key: 'purpose', value: 'prefetch' },

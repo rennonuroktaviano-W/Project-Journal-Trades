@@ -22,13 +22,16 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
+    "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "db:reset": "prisma migrate reset --force"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.1",
+    "@prisma/adapter-mariadb": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "lightweight-charts": "^5.2.1",
+    "mariadb": "^3.4.7",
     "next": "^16.3.7",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
@@ -57,6 +60,7 @@
   },
   "overrides": {
     "mysql2": "^3.24.5",
+    "mariadb": "^3.4.7",
     "deepmerge-ts": "^8.0.2"
   }
 }

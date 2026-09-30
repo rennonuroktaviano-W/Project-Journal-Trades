@@ -4,3 +4,10 @@ coverage
 package-lock.json
 docs
 *.docx
+
+# Hasil `prisma generate`, bukan kode yang ditulis tangan.
+src/generated/prisma
+
+# Upload dan cache runtime (PRD 7.1)
+storage
+.cache

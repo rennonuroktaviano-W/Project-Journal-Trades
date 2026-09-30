@@ -20,6 +20,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    // Modul server membaca process.env langsung, jadi .env.local dimuat di sini.
+    setupFiles: ['./tests/setup/env.ts'],
     // Prisma dan modul server butuh waktu boot di modul per test file.
     testTimeout: 20_000,
     hookTimeout: 30_000,

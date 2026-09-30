@@ -46,6 +46,11 @@ export function siteUrl(): string {
 export const db = {
   url: () => env('DATABASE_URL'),
   migrateUrl: () => process.env.DATABASE_MIGRATE_URL ?? env('DATABASE_URL'),
+  /**
+   * MySQL 8.4 memakai caching_sha2_password. Tanpa TLS, driver harus mengambil
+   * kunci RSA publik server lebih dulu, yang aman hanya untuk loopback lokal.
+   */
+  ssl: () => envBool('DATABASE_SSL', false),
 }
 
 export const session = {
